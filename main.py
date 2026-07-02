@@ -5,7 +5,7 @@ import json
 import gradio as gr
 from models import *
 from ticket_prices import ticket_prices_map
-from database import AsyncSession, get_session
+from database import engine, get_session
 from fastapi import Depends
 import asyncio
 from sqlalchemy import select
@@ -41,16 +41,18 @@ system_message = [{"role":"system", "content":system_prompt}]
 
 
 async def create_and_insert():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    
     async for session in get_session():
-
-        for city, price in ticket_prices_map.items():
-            ticket_price = TicketPrices(
-                city = city,
-                price = price
-            )
-            await session.commit(ticket_price)
-    return "ticket prices added"
-
+        for item in ticket_prices_map:
+            for city, price in item.items():
+                stmt = select(TicketPrices).where(TicketPrices.city_name == city)
+                existing = (await session.execute(stmt)).scalar_one_or_none()
+                if not existing:
+                    ticket_price = TicketPrices(city_name = city, price = price)
+                    session.add(ticket_price)
+        await session.commit()
 
 asyncio.run(create_and_insert())
 
@@ -100,28 +102,29 @@ async def chat(message, history):
     relevant_response = resp.choices[0].message
 
     if relevant_response.tool_calls:
-        response = list(await call_tool(relevant_response))
+        responses = await call_tool(relevant_response)
         messages.append(relevant_response)
-        messages.extend(response)
+        messages.extend(responses)
 
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages
         )
 
-        if resp.choices[0].delta.content:
-            for chunk in resp.choices[0].delta.content:
-                yield chunk
+        return resp.choices[0].message.content
+    return relevant_response.content
 
 async def call_tool(message):
-    tool_call = message.tool_calls[0]
-    if tool_call.function.name == "get_ticket_price_by_city":
-        arguments = json.load(tool_call.function.arguments)
-        city = arguments.get("city_name")
-        response = await get_ticket_price_by_city(city)
+    responses = []
+    for tool_call in message.tool_calls:
+        if tool_call.function.name == "get_ticket_price_by_city":
+            arguments = json.loads(tool_call.function.arguments)
+            city = arguments.get("city")
+            price_detail = await get_ticket_price_by_city(city)
 
-        return {
-            "role":"tool",
-            "content":response,
-            "tool_call_id":tool_call.id
-        }
+            responses.append( {
+                "role":"tool",
+                "content":str(price_detail),
+                "tool_call_id":tool_call.id
+            })
+    return responses
