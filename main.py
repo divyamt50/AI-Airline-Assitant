@@ -88,9 +88,12 @@ tools = [
 ]
 
 async def chat(message, history):
-    history = [{"role":h["role"], "content":h["content"]} for h in history]
+    formatted_history = []
 
-    messages = system_message + history + [{"role":"user", "content":message}]
+    for h in history:
+        history.append({"role":h.get("role"), "content":h.get("content")})
+
+    messages = system_message + formatted_history + [{"role":"user", "content":message}]
 
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
@@ -101,18 +104,20 @@ async def chat(message, history):
 
     relevant_response = resp.choices[0].message
 
-    if relevant_response.tool_calls:
-        responses = await call_tool(relevant_response)
+    while relevant_response.tool_calls:
+        tool_responses = await call_tool(relevant_response)
         messages.append(relevant_response)
-        messages.extend(responses)
+        messages.extend(tool_responses)
 
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=messages
+            messages=messages,
+            tools=tools,           
+            tool_choice="auto"
         )
 
-        return resp.choices[0].message.content
-    return relevant_response.content
+        relevant_response = resp.choices[0].message
+    return relevant_response.content or "I'm sorry, I couldn't formulate a response."
 
 async def call_tool(message):
     responses = []
@@ -128,3 +133,5 @@ async def call_tool(message):
                 "tool_call_id":tool_call.id
             })
     return responses
+
+gr.ChatInterface(fn=chat).launch(inbrowser=True)
